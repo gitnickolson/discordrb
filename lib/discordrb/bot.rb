@@ -22,7 +22,6 @@ require 'discordrb/events/interactions'
 require 'discordrb/events/threads'
 require 'discordrb/events/integrations'
 require 'discordrb/events/scheduled_events'
-require 'discordrb/events/polls'
 
 require 'discordrb/api'
 require 'discordrb/api/channel'
@@ -420,17 +419,16 @@ module Discordrb
     # @param components [View, Array<Hash>] Interaction components to associate with this message.
     # @param flags [Integer] Flags for this message. Currently only SUPPRESS_EMBEDS (1 << 2), SUPPRESS_NOTIFICATIONS (1 << 12), and IS_COMPONENTS_V2 (1 << 15) can be set.
     # @param nonce [String, nil] A optional nonce in order to verify that a message was sent. Maximum of twenty-five characters.
-    # @param enforce_nonce [true, false] Whether the nonce should be enforced and used for message de-duplication.
-    # @param poll [Hash, Poll::Builder, Poll, nil] The poll that should be attached to this message.
+    # @param enforce_nonce [true, false] whether the nonce should be enforced and used for message de-duplication.
     # @return [Message] The message that was sent.
-    def send_message(channel, content, tts = false, embeds = nil, attachments = nil, allowed_mentions = nil, message_reference = nil, components = nil, flags = 0, nonce = nil, enforce_nonce = false, poll = nil)
+    def send_message(channel, content, tts = false, embeds = nil, attachments = nil, allowed_mentions = nil, message_reference = nil, components = nil, flags = 0, nonce = nil, enforce_nonce = false)
       channel = channel.resolve_id
       debug("Sending message to #{channel} with content '#{content}'")
       allowed_mentions = { parse: [] } if allowed_mentions == false
       message_reference = { message_id: message_reference.resolve_id } if message_reference.respond_to?(:resolve_id)
       embeds = (embeds.instance_of?(Array) ? embeds.map(&:to_hash) : [embeds&.to_hash]).compact
 
-      response = API::Channel.create_message(token, channel, content, tts, embeds, nonce, attachments, allowed_mentions&.to_hash, message_reference, components, flags, enforce_nonce, poll&.to_h)
+      response = API::Channel.create_message(token, channel, content, tts, embeds, nonce, attachments, allowed_mentions&.to_hash, message_reference, components, flags, enforce_nonce)
       Message.new(JSON.parse(response), self)
     end
 
@@ -447,13 +445,12 @@ module Discordrb
     # @param components [View, Array<Hash>] Interaction components to associate with this message.
     # @param flags [Integer] Flags for this message. Currently only SUPPRESS_EMBEDS (1 << 2), SUPPRESS_NOTIFICATIONS (1 << 12), and IS_COMPONENTS_V2 (1 << 15) can be set.
     # @param nonce [String, nil] A optional nonce in order to verify that a message was sent. Maximum of twenty-five characters.
-    # @param enforce_nonce [true, false] Whether the nonce should be enforced and used for message de-duplication.
-    # @param poll [Hash, Poll::Builder, Poll, nil] The poll that should be attached to this message.
-    def send_temporary_message(channel, content, timeout, tts = false, embeds = nil, attachments = nil, allowed_mentions = nil, message_reference = nil, components = nil, flags = 0, nonce = nil, enforce_nonce = false, poll = nil)
+    # @param enforce_nonce [true, false] whether the nonce should be enforced and used for message de-duplication.
+    def send_temporary_message(channel, content, timeout, tts = false, embeds = nil, attachments = nil, allowed_mentions = nil, message_reference = nil, components = nil, flags = 0, nonce = nil, enforce_nonce = false)
       Thread.new do
         Thread.current[:discordrb_name] = "#{@current_thread}-temp-msg"
 
-        message = send_message(channel, content, tts, embeds, attachments, allowed_mentions, message_reference, components, flags, nonce, enforce_nonce, poll)
+        message = send_message(channel, content, tts, embeds, attachments, allowed_mentions, message_reference, components, flags, nonce, enforce_nonce)
         sleep(timeout)
         message.delete
       end
@@ -803,12 +800,13 @@ module Discordrb
 
     # Get all application commands.
     # @param server_id [String, Integer, nil] The ID of the server to get the commands from. Global if `nil`.
-    # @return [Array<ApplicationCommand>]
-    def get_application_commands(server_id: nil)
+    # @param with_localizations [true, false] Whether the full localizations of commands should be included in the result.
+    # @return [Array<ApplicationCommand>] The global application commands, or server-specific application commands for the application.
+    def get_application_commands(server_id: nil, with_localizations: false)
       resp = if server_id
-               API::Application.get_guild_commands(@token, profile.id, server_id)
+               API::Application.get_guild_commands(@token, profile.id, server_id, with_localizations)
              else
-               API::Application.get_global_commands(@token, profile.id)
+               API::Application.get_global_commands(@token, profile.id, with_localizations)
              end
 
       JSON.parse(resp).map do |command_data|
@@ -817,7 +815,7 @@ module Discordrb
     end
 
     # Get an application command by ID.
-    # @param command_id [String, Integer]
+    # @param command_id [String, Integer] The ID of the application command to get.
     # @param server_id [String, Integer, nil] The ID of the server to get the command from. Global if `nil`.
     def get_application_command(command_id, server_id: nil)
       resp = if server_id
@@ -842,7 +840,7 @@ module Discordrb
     #       end
     #     end
     #   end
-    def register_application_command(name, description, server_id: nil, default_permission: nil, type: :chat_input, default_member_permissions: nil, contexts: nil, nsfw: false, integration_types: nil)
+    def register_application_command(name, description, server_id: nil, default_permission: nil, type: :chat_input, default_member_permissions: nil, contexts: nil, nsfw: false, integration_types: nil, name_localizations: nil, description_localizations: nil)
       type = ApplicationCommand::TYPES[type] || type
 
       contexts = contexts&.map { |context| Interaction::CONTEXTS[context] || context }
@@ -854,9 +852,9 @@ module Discordrb
       yield(builder, permission_builder) if block_given?
 
       resp = if server_id
-               API::Application.create_guild_command(@token, profile.id, server_id, name, description, builder.to_a, default_permission, type, default_member_permissions&.to_s, contexts, nsfw)
+               API::Application.create_guild_command(@token, profile.id, server_id, name, description, builder.to_a, default_permission, type, default_member_permissions&.to_s, contexts, nsfw, name_localizations, description_localizations)
              else
-               API::Application.create_global_command(@token, profile.id, name, description, builder.to_a, default_permission, type, default_member_permissions&.to_s, contexts, nsfw, integration_types)
+               API::Application.create_global_command(@token, profile.id, name, description, builder.to_a, default_permission, type, default_member_permissions&.to_s, contexts, nsfw, integration_types, name_localizations, description_localizations)
              end
       cmd = ApplicationCommand.new(JSON.parse(resp), self, server_id)
 
@@ -871,7 +869,7 @@ module Discordrb
 
     # @yieldparam [OptionBuilder]
     # @yieldparam [PermissionBuilder]
-    def edit_application_command(command_id, server_id: nil, name: nil, description: nil, default_permission: nil, type: :chat_input, default_member_permissions: nil, contexts: nil, nsfw: nil, integration_types: nil)
+    def edit_application_command(command_id, server_id: nil, name: nil, description: nil, default_permission: nil, type: :chat_input, default_member_permissions: nil, contexts: nil, nsfw: nil, integration_types: nil, name_localizations: nil, description_localizations: nil)
       type = ApplicationCommand::TYPES[type] || type
 
       contexts = contexts&.map { |context| Interaction::CONTEXTS[context] || context }
@@ -884,9 +882,9 @@ module Discordrb
       yield(builder, permission_builder) if block_given?
 
       resp = if server_id
-               API::Application.edit_guild_command(@token, profile.id, server_id, command_id, name, description, builder.to_a, default_permission, type, default_member_permissions&.to_s, contexts, nsfw)
+               API::Application.edit_guild_command(@token, profile.id, server_id, command_id, name, description, builder.to_a, default_permission, type, default_member_permissions&.to_s, contexts, nsfw, name_localizations, description_localizations)
              else
-               API::Application.edit_global_command(@token, profile.id, command_id, name, description, builder.to_a, default_permission, type, default_member_permissions&.to_s, contexts, nsfw, integration_types)
+               API::Application.edit_global_command(@token, profile.id, command_id, name, description, builder.to_a, default_permission, type, default_member_permissions&.to_s, contexts, nsfw, integration_types, name_localizations, description_localizations)
              end
       cmd = ApplicationCommand.new(JSON.parse(resp), self, server_id)
 
@@ -1755,12 +1753,6 @@ module Discordrb
         end
 
         event = ThreadMembersUpdateEvent.new(data, self)
-        raise_event(event)
-      when :MESSAGE_POLL_VOTE_ADD
-        event = PollVoteAddEvent.new(data, self)
-        raise_event(event)
-      when :MESSAGE_POLL_VOTE_REMOVE
-        event = PollVoteRemoveEvent.new(data, self)
         raise_event(event)
       when :GUILD_SCHEDULED_EVENT_CREATE
         update_guild_scheduled_event(data)
